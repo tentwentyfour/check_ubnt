@@ -1,0 +1,75 @@
+#!/usr/bin/env python
+""" Check Ubiquiti AirOS signal quality & device status.
+    Tested with Airos 5.6.3 """
+
+import nagiosplugin
+import telnetlib
+import simplejson as json
+import nagiosplugin
+import argparse
+
+__version__ = '0.1.0'
+keys = ["ccq", "rssi", "rxrate", "txrate"]
+
+
+def getJSON(tn_host, tn_user, tn_pass):
+    # Log into device
+    tn = telnetlib.Telnet(tn_host)
+    tn.read_until("login: ")
+    tn.write(tn_user + "\n\r")
+    tn.read_until("Password: ")
+    tn.write(tn_pass + "\n\r")
+
+    # Get status json
+    tn.write("/usr/www/status.cgi" + "\n\r")
+    tn.read_until("application/json")
+    result = tn.read_until("]\r\n}")
+    tn.write("exit" + "\n\r")
+    return json.loads(result)
+
+
+@nagiosplugin.guarded
+class Ubiquiti(nagiosplugin.Resource):
+    def __init__(self, hostname, user, password):
+        self.hostname = hostname
+        self.user = user
+        self.password = password
+
+    def probe(self):
+        data = getJSON(self.hostname, self.user, self.password)
+        for key in keys:
+            yield nagiosplugin.Metric(key, float(data["wireless"][key]))
+
+
+def main():
+    argp = argparse.ArgumentParser(description=__doc__)
+
+    argp.add_argument('-V', '--version', action='version',
+                      version=' '.join(['%(prog)s', __version__]))
+    argp.add_argument('-H', '--hostname', metavar='NAME', required=True,
+
+                      help='Hostname or IP address of the Ubiquiti device')
+    argp.add_argument('-U', '--username', metavar='NAME', default='ubnt',
+                      help='Username for Telnet login')
+
+    argp.add_argument('-P', '--password', metavar='NAME', default='ubnt',
+                      help='Password for Telnet login')
+
+    for key in keys:
+        argp.add_argument('--w' + key, metavar='RANGE', default='',
+                          help='Return warn. if ' + key + ' is outside RANGE')
+        argp.add_argument('--c' + key, metavar='RANGE', default='',
+                          help='Return crit. if ' + key + ' is outside RANGE')
+
+    args = argp.parse_args()
+    check = nagiosplugin.Check(
+        Ubiquiti(args.hostname, args.username, args.password),
+        nagiosplugin.ScalarContext('ccq', args.wccq, args.crssi),
+        nagiosplugin.ScalarContext('rssi', args.wrssi, args.crssi),
+        nagiosplugin.ScalarContext('txrate', args.wtxrate, args.ctxrate),
+        nagiosplugin.ScalarContext('rxrate', args.wrxrate, args.crxrate))
+
+    return check.main()
+
+if __name__ == '__main__':
+    main()
