@@ -9,7 +9,7 @@ import nagiosplugin
 import argparse
 
 __version__ = '0.1.0'
-keys = ["ccq", "rssi", "rxrate", "txrate"]
+keys = ["ccq", "rssi", "rxrate", "txrate", "signal", "noisef"]
 
 
 def getJSON(tn_host, tn_user, tn_pass):
@@ -38,7 +38,15 @@ class Ubiquiti(nagiosplugin.Resource):
     def probe(self):
         data = getJSON(self.hostname, self.user, self.password)
         for key in keys:
-            yield nagiosplugin.Metric(key, float(data["wireless"][key]))
+            # Very ugly workaround to handle negative dBm values.
+            # Just assume they are positive for now.
+            if key in ('signal', 'noisef'):
+                yield nagiosplugin.Metric(key, (data["wireless"][key] * -1))
+            # TX & RX rate are floating values
+            elif key in ('rxrate', 'txrate'):
+                yield nagiosplugin.Metric(key, float(data["wireless"][key]))
+            else:
+                yield nagiosplugin.Metric(key, (data["wireless"][key]))
 
 
 def main():
@@ -67,8 +75,9 @@ def main():
         nagiosplugin.ScalarContext('ccq', args.wccq, args.crssi),
         nagiosplugin.ScalarContext('rssi', args.wrssi, args.crssi),
         nagiosplugin.ScalarContext('txrate', args.wtxrate, args.ctxrate),
-        nagiosplugin.ScalarContext('rxrate', args.wrxrate, args.crxrate))
-
+        nagiosplugin.ScalarContext('rxrate', args.wrxrate, args.crxrate),
+        nagiosplugin.ScalarContext('signal', args.wsignal, args.csignal),
+        nagiosplugin.ScalarContext('noisef', args.wnoisef, args.cnoisef))
     return check.main()
 
 if __name__ == '__main__':
