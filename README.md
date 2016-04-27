@@ -6,7 +6,7 @@ Plugin is usable, but not complete. Metrics for test usage are
 * rssi
 * rxrate
 * txrate
-* signal (dBm)
+* signal (-dBm)
 * noise figure (dBm)
 
 Sample output:
