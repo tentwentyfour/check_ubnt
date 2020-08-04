@@ -3,21 +3,63 @@
     Tested with Airos 5.6.3 """
 
 import nagiosplugin
-import telnetlib
 import simplejson as json
 import nagiosplugin
 import argparse
+import os.path
 
 __version__ = '0.1.1'
-keys = ["ccq", "rssi", "rxrate", "txrate", "signal", "noisef"]
+keys = [ "cinr", "rssi", "rx", "tx", "signal", "noisef"]
 
-
-def getJSON(tn_host, tn_user, tn_pass):
+def getJSON(tn_host, tn_user, tn_pass, proto='ssh', verbose=False):
     # Log into device
+    if proto == 'telnet':
+        result = getStatusFromTelnet(tn_host, tn_user, tn_pass)
+    else:
+        result = getStatusFromSsh(tn_host, tn_user, tn_pass)
+
+    if verbose: print('%s' % json.loads(json.dumps(result, indent=2, sort_keys=True)))
+    return json.loads(result)
+
+
+def getStatusFromSsh(tn_host, tn_user, tn_pass):
+    import paramiko
+    sshclient = paramiko.SSHClient()
+    sshclient.load_system_host_keys()
+    try:
+        # pubkey auth
+        if os.path.isfile(tn_pass):
+            k = paramiko.RSAKey.from_private_key_file(filename=tn_pass)
+            sshclient.connect(tn_host, username=tn_user, pkey=k)
+        # pass auth
+        else:
+            sshclient.connect(tn_host,username=tn_user,password=tn_pass)
+    except Exception as e:
+        print('CRITICAL - Could not reach device at %s (%s)' % (tn_host, e))
+        raise SystemExit(2)
+
+    # run command
+    stdin, stdout, stderr = sshclient.exec_command('/usr/www/status.cgi')
+
+    # Get status json
+    record = False
+    result = []
+    for i in stdout.readlines():
+        i = i.strip()
+        if 'Content-Type: application/json' in i: pass
+        elif len(i): result.append(i)
+
+    # close connexion
+    sshclient.close()
+    return ''.join(result)
+
+
+def getStatusFromTelnet(tn_host, tn_user, tn_pass):
+    import telnetlib
     try:
         tn = telnetlib.Telnet(tn_host)
-    except Exception, e:
-        print 'CRITICAL - Could not reach device at %s' % (tn_host)
+    except Exception as e:
+        print('CRITICAL - Could not reach device at %s' % (tn_host))
         raise SystemExit(2) 
 
     tn.read_until("login: ")
@@ -30,29 +72,40 @@ def getJSON(tn_host, tn_user, tn_pass):
     tn.read_until("application/json")
     result = tn.read_until("]\r\n}")
     tn.write("exit" + "\n\r")
-    return json.loads(result)
+    return result
 
 
 @nagiosplugin.guarded
 class Ubiquiti(nagiosplugin.Resource):
-    def __init__(self, hostname, user, password):
+    def __init__(self, hostname, user, password, proto, verbose):
         self.hostname = hostname
         self.user = user
         self.password = password
+        self.proto = proto
+        self.verbose = verbose
 
     def probe(self):
-        data = getJSON(self.hostname, self.user, self.password)
+        data = getJSON(self.hostname, self.user, self.password, self.proto, self.verbose)
         for key in keys:
-            print key
+            print(key)
             # Very ugly workaround to handle negative dBm values.
             # Just assume they are positive for now.
-            if key in ('signal', 'noisef'):
+            if key in ('signal', 'rssi'):
+                if data["wireless"]['sta'][0][key] < 0:
+                    data["wireless"]['sta'][0][key] = (data["wireless"]['sta'][0][key] * -1)
+                yield nagiosplugin.Metric(key, data["wireless"]['sta'][0][key])
+            elif key in ('noisef'):
                 yield nagiosplugin.Metric(key, (data["wireless"][key] * -1))
-            # TX & RX rate are floating values
-            elif key in ('rxrate', 'txrate'):
-                yield nagiosplugin.Metric(key, float(data["wireless"][key]))
-            else:
-                yield nagiosplugin.Metric(key, (data["wireless"][key]))
+
+            elif key in ('rx', 'tx'):
+                k = 'txrate' if key == 'tx' else 'rxrate'
+                #yield nagiosplugin.Metric(k, (data["wireless"]['throughput'][key] * -1))
+                yield nagiosplugin.Metric(k, data["wireless"]['throughput'][key])
+
+            # XXX not sure this is OK
+            #elif key in ('cinr'):
+            #    yield nagiosplugin.Metric('rxrate', (data["wireless"]['sta'][0]['airmax']['rx'][key] * -1))
+            #    yield nagiosplugin.Metric('txrate', (data["wireless"]['sta'][0]['airmax']['tx'][key] * -1)) 
 
 
 def main():
@@ -69,6 +122,9 @@ def main():
     argp.add_argument('-P', '--password', metavar='NAME', default='ubnt',
                       help='Password for Telnet login')
 
+    argp.add_argument('-t','--telnet', action='store_true', help="Use the (insecure) telnet protocol.", default=False)
+    argp.add_argument('-s','--ssh', action='store_true', help="Use the ssh protocol.", default=True)
+    argp.add_argument('-v','--verbose', action='store_true', help="Be verbose. (default: False)", default=False)
     for key in keys:
         argp.add_argument('--w' + key, metavar='RANGE', default='',
                           help='Return warn. if ' + key + ' is outside RANGE')
@@ -76,12 +132,13 @@ def main():
                           help='Return crit. if ' + key + ' is outside RANGE')
 
     args = argp.parse_args()
+    args.proto = 'telnet' if args.telnet else 'ssh'
     check = nagiosplugin.Check(
-        Ubiquiti(args.hostname, args.username, args.password),
-        nagiosplugin.ScalarContext('ccq', args.wccq, args.crssi),
+        Ubiquiti(args.hostname, args.username, args.password, args.proto, args.verbose),
+        nagiosplugin.ScalarContext('cinr', args.wcinr, args.ccinr),
         nagiosplugin.ScalarContext('rssi', args.wrssi, args.crssi),
-        nagiosplugin.ScalarContext('txrate', args.wtxrate, args.ctxrate),
-        nagiosplugin.ScalarContext('rxrate', args.wrxrate, args.crxrate),
+        nagiosplugin.ScalarContext('txrate', args.wtx, args.ctx),
+        nagiosplugin.ScalarContext('rxrate', args.wrx, args.crx),
         nagiosplugin.ScalarContext('signal', args.wsignal, args.csignal),
         nagiosplugin.ScalarContext('noisef', args.wnoisef, args.cnoisef))
     return check.main()
